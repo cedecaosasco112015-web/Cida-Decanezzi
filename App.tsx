@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { ActiveTab, Book, Audiobook, ExplainedBook, LibraryItem } from './types';
 import { BOOKS, AUDIOBOOKS, EXPLAINED_BOOKS, ALL_ITEMS } from './constants';
 import { generateBookSummary } from './services/geminiService';
-import { HomeIcon, BookOpenIcon, HeadphonesIcon, LightBulbIcon, UserIcon, PlayIcon, PauseIcon, HeartIcon, XMarkIcon } from './components/icons';
+import { HomeIcon, BookOpenIcon, HeadphonesIcon, LightBulbIcon, UserIcon, PlayIcon, PauseIcon, HeartIcon, XMarkIcon, ArrowDownTrayIcon, TrashIcon } from './components/icons';
 
 type AudioTrack = Audiobook | ExplainedBook;
 
@@ -10,8 +10,39 @@ type AudioTrack = Audiobook | ExplainedBook;
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
+  const [offlineItems, setOfflineItems] = useState<Set<string>>(new Set());
   const [currentTrack, setCurrentTrack] = useState<AudioTrack | null>(null);
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
+  
+  useEffect(() => {
+    // Register Service Worker for offline capabilities
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js')
+          .then(registration => console.log('Service Worker registered with scope:', registration.scope))
+          .catch(error => console.log('Service Worker registration failed:', error));
+      });
+    }
+
+    // Load state from local storage
+    const savedFavorites = localStorage.getItem('emarkez-favorites');
+    if (savedFavorites) {
+      setFavorites(new Set(JSON.parse(savedFavorites)));
+    }
+    const savedOfflineItems = localStorage.getItem('emarkez-offline');
+    if (savedOfflineItems) {
+      setOfflineItems(new Set(JSON.parse(savedOfflineItems)));
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('emarkez-favorites', JSON.stringify(Array.from(favorites)));
+  }, [favorites]);
+  
+  useEffect(() => {
+    localStorage.setItem('emarkez-offline', JSON.stringify(Array.from(offlineItems)));
+  }, [offlineItems]);
+
 
   const toggleFavorite = useCallback((item: LibraryItem) => {
     setFavorites(prev => {
@@ -25,20 +56,65 @@ export default function App() {
     });
   }, []);
 
+  const handleDownload = useCallback((item: LibraryItem) => {
+    const url = 'audioUrl' in item ? item.audioUrl : null;
+    if (!url) {
+        alert('Downloads estão disponíveis apenas para audiolivros e livros explicados nesta demonstração.');
+        return;
+    }
+
+    if (navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({
+            type: 'DOWNLOAD',
+            payload: { id: item.id, url }
+        });
+        setOfflineItems(prev => new Set(prev).add(item.id));
+        alert(`"${item.title}" está sendo baixado para acesso offline.`);
+    } else {
+        alert('Não foi possível iniciar o download. O serviço de offline não está pronto.');
+    }
+  }, []);
+
+  const handleDeleteOffline = useCallback((item: LibraryItem) => {
+    const url = 'audioUrl' in item ? item.audioUrl : null;
+    if (!url) return;
+
+    if (navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({
+            type: 'DELETE',
+            payload: { id: item.id, url }
+        });
+        setOfflineItems(prev => {
+            const newSet = new Set(prev);
+            newSet.delete(item.id);
+            return newSet;
+        });
+    }
+  }, []);
+
+  const commonScreenProps = {
+    favorites,
+    toggleFavorite,
+    offlineItems,
+    handleDownload,
+    handleDeleteOffline,
+  };
+
+
   const renderContent = () => {
     switch (activeTab) {
       case 'home':
-        return <HomeScreen onSelectItem={handleSelectItem} favorites={favorites} toggleFavorite={toggleFavorite} />;
+        return <HomeScreen onSelectItem={handleSelectItem} {...commonScreenProps} />;
       case 'books':
-        return <LibraryScreen items={BOOKS} title="Livros" onSelectItem={handleSelectItem} favorites={favorites} toggleFavorite={toggleFavorite} />;
+        return <LibraryScreen items={BOOKS} title="Livros" onSelectItem={handleSelectItem} {...commonScreenProps} />;
       case 'audiobooks':
-        return <LibraryScreen items={AUDIOBOOKS} title="Audiolivros" onSelectItem={handleSelectItem} favorites={favorites} toggleFavorite={toggleFavorite} />;
+        return <LibraryScreen items={AUDIOBOOKS} title="Audiolivros" onSelectItem={handleSelectItem} {...commonScreenProps} />;
       case 'explained':
-        return <LibraryScreen items={EXPLAINED_BOOKS} title="Livros Explicados" onSelectItem={handleSelectItem} favorites={favorites} toggleFavorite={toggleFavorite} />;
+        return <LibraryScreen items={EXPLAINED_BOOKS} title="Livros Explicados" onSelectItem={handleSelectItem} {...commonScreenProps} />;
       case 'profile':
         return <ProfileScreen favorites={favorites} />;
       default:
-        return <HomeScreen onSelectItem={handleSelectItem} favorites={favorites} toggleFavorite={toggleFavorite} />;
+        return <HomeScreen onSelectItem={handleSelectItem} {...commonScreenProps} />;
     }
   };
 
@@ -70,6 +146,9 @@ export default function App() {
                 book={selectedBook}
                 isFavorite={favorites.has(selectedBook.id)}
                 toggleFavorite={() => toggleFavorite(selectedBook)}
+                isOffline={offlineItems.has(selectedBook.id)}
+                onDownload={() => handleDownload(selectedBook)}
+                onDeleteOffline={() => handleDeleteOffline(selectedBook)}
                 onClose={() => setSelectedBook(null)}
             />
         )}
@@ -130,13 +209,17 @@ interface ScreenProps {
     onSelectItem: (item: LibraryItem) => void;
     favorites: Set<string>;
     toggleFavorite: (item: LibraryItem) => void;
+    offlineItems: Set<string>;
+    handleDownload: (item: LibraryItem) => void;
+    handleDeleteOffline: (item: LibraryItem) => void;
 }
 
-const HomeScreen: React.FC<ScreenProps> = ({ onSelectItem, favorites, toggleFavorite }) => {
+const HomeScreen: React.FC<ScreenProps> = ({ onSelectItem, favorites, toggleFavorite, offlineItems, handleDownload, handleDeleteOffline }) => {
     const [searchTerm, setSearchTerm] = useState('');
     const filteredItems = ALL_ITEMS.filter(item =>
         item.title.toLowerCase().includes(searchTerm.toLowerCase())
     );
+    const itemCardProps = { onSelect: onSelectItem, favorites, toggleFavorite, offlineItems, handleDownload, handleDeleteOffline };
 
     return (
         <div className="container mx-auto p-4 space-y-8">
@@ -155,36 +238,36 @@ const HomeScreen: React.FC<ScreenProps> = ({ onSelectItem, favorites, toggleFavo
                      <h2 className="text-2xl font-bold font-sans text-brand-blue mb-4">Resultados da Pesquisa</h2>
                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
                         {filteredItems.map(item => (
-                            <ItemCard key={item.id} item={item} onSelect={onSelectItem} isFavorite={favorites.has(item.id)} toggleFavorite={() => toggleFavorite(item)} />
+                            <ItemCard key={item.id} item={item} {...itemCardProps} isFavorite={favorites.has(item.id)} isOffline={offlineItems.has(item.id)} />
                         ))}
                      </div>
                 </div>
             ) : (
                 <>
-                    <SectionCarousel title="Destaques do Dia" items={ALL_ITEMS.slice(0, 5)} onSelectItem={onSelectItem} favorites={favorites} toggleFavorite={toggleFavorite}/>
-                    <SectionCarousel title="Livros Explicados" items={EXPLAINED_BOOKS} onSelectItem={onSelectItem} favorites={favorites} toggleFavorite={toggleFavorite}/>
-                    <SectionCarousel title="Audiolivros Populares" items={AUDIOBOOKS} onSelectItem={onSelectItem} favorites={favorites} toggleFavorite={toggleFavorite}/>
+                    <SectionCarousel title="Destaques do Dia" items={ALL_ITEMS.slice(0, 5)} {...itemCardProps} />
+                    <SectionCarousel title="Livros Explicados" items={EXPLAINED_BOOKS} {...itemCardProps} />
+                    <SectionCarousel title="Audiolivros Populares" items={AUDIOBOOKS} {...itemCardProps} />
                 </>
             )}
         </div>
     );
 };
 
-interface LibraryScreenProps {
+interface LibraryScreenProps extends Omit<ScreenProps, 'onSelectItem' | 'toggleFavorite'> {
     items: LibraryItem[];
     title: string;
     onSelectItem: (item: LibraryItem) => void;
-    favorites: Set<string>;
     toggleFavorite: (item: LibraryItem) => void;
 }
 
-const LibraryScreen: React.FC<LibraryScreenProps> = ({ items, title, onSelectItem, favorites, toggleFavorite }) => {
+const LibraryScreen: React.FC<LibraryScreenProps> = ({ items, title, onSelectItem, favorites, toggleFavorite, offlineItems, handleDownload, handleDeleteOffline }) => {
+    const itemCardProps = { onSelect: onSelectItem, favorites, toggleFavorite, offlineItems, handleDownload, handleDeleteOffline };
     return (
         <div className="container mx-auto p-4">
             <h2 className="text-3xl font-bold font-sans text-brand-blue mb-6">{title}</h2>
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
                 {items.map(item => (
-                    <ItemCard key={item.id} item={item} onSelect={onSelectItem} isFavorite={favorites.has(item.id)} toggleFavorite={() => toggleFavorite(item)} />
+                    <ItemCard key={item.id} item={item} {...itemCardProps} isFavorite={favorites.has(item.id)} isOffline={offlineItems.has(item.id)}/>
                 ))}
             </div>
         </div>
@@ -230,17 +313,20 @@ const ProfileScreen: React.FC<{ favorites: Set<string> }> = ({ favorites }) => {
 interface SectionCarouselProps {
     title: string;
     items: LibraryItem[];
-    onSelectItem: (item: LibraryItem) => void;
+    onSelect: (item: LibraryItem) => void;
     favorites: Set<string>;
     toggleFavorite: (item: LibraryItem) => void;
+    offlineItems: Set<string>;
+    handleDownload: (item: LibraryItem) => void;
+    handleDeleteOffline: (item: LibraryItem) => void;
 }
-const SectionCarousel: React.FC<SectionCarouselProps> = ({ title, items, onSelectItem, favorites, toggleFavorite }) => (
+const SectionCarousel: React.FC<SectionCarouselProps> = ({ title, items, onSelect, favorites, toggleFavorite, offlineItems, handleDownload, handleDeleteOffline }) => (
     <section>
         <h2 className="text-2xl font-bold font-sans text-brand-blue mb-4">{title}</h2>
         <div className="flex space-x-4 overflow-x-auto pb-4 -mx-4 px-4">
             {items.map(item => (
                 <div key={item.id} className="flex-shrink-0 w-36 sm:w-40">
-                    <ItemCard item={item} onSelect={onSelectItem} isFavorite={favorites.has(item.id)} toggleFavorite={() => toggleFavorite(item)} />
+                    <ItemCard item={item} onSelect={onSelect} isFavorite={favorites.has(item.id)} toggleFavorite={() => toggleFavorite(item)} isOffline={offlineItems.has(item.id)} onDownload={() => handleDownload(item)} onDeleteOffline={() => handleDeleteOffline(item)} />
                 </div>
             ))}
         </div>
@@ -252,20 +338,36 @@ interface ItemCardProps {
     onSelect: (item: LibraryItem) => void;
     isFavorite: boolean;
     toggleFavorite: () => void;
+    isOffline: boolean;
+    onDownload: () => void;
+    onDeleteOffline: () => void;
 }
-const ItemCard: React.FC<ItemCardProps> = ({ item, onSelect, isFavorite, toggleFavorite }) => {
-    const handleFavoriteClick = (e: React.MouseEvent) => {
+const ItemCard: React.FC<ItemCardProps> = ({ item, onSelect, isFavorite, toggleFavorite, isOffline, onDownload, onDeleteOffline }) => {
+    const handleActionClick = (e: React.MouseEvent, action: () => void) => {
         e.stopPropagation();
-        toggleFavorite();
+        action();
     };
 
     return (
         <div className="group cursor-pointer" onClick={() => onSelect(item)}>
             <div className="relative">
                 <img src={item.coverUrl} alt={item.title} className="w-full aspect-[2/3] object-cover rounded-lg shadow-md transition-transform group-hover:scale-105" />
-                <button onClick={handleFavoriteClick} className="absolute top-2 right-2 bg-black/50 p-1.5 rounded-full text-white hover:text-red-500 transition-colors">
-                    <HeartIcon className="w-5 h-5" filled={isFavorite} />
-                </button>
+                <div className="absolute top-2 right-2 flex flex-col gap-2">
+                    <button onClick={(e) => handleActionClick(e, toggleFavorite)} className="bg-black/50 p-1.5 rounded-full text-white hover:text-red-500 transition-colors" aria-label={isFavorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}>
+                        <HeartIcon className="w-5 h-5" filled={isFavorite} />
+                    </button>
+                    {(item.type === 'audiobook' || item.type === 'explained') && (
+                        isOffline ? (
+                            <button onClick={(e) => handleActionClick(e, onDeleteOffline)} className="bg-black/50 p-1.5 rounded-full text-white hover:text-yellow-400 transition-colors" aria-label="Remover do modo offline">
+                                <TrashIcon className="w-5 h-5" />
+                            </button>
+                        ) : (
+                            <button onClick={(e) => handleActionClick(e, onDownload)} className="bg-black/50 p-1.5 rounded-full text-white hover:text-green-400 transition-colors" aria-label="Baixar para ouvir offline">
+                                <ArrowDownTrayIcon className="w-5 h-5" />
+                            </button>
+                        )
+                    )}
+                </div>
             </div>
             <h3 className="font-bold mt-2 truncate text-sm">{item.title}</h3>
             <p className="text-xs text-gray-600 truncate">{item.type === 'book' || item.type === 'audiobook' ? item.author : item.bookTitle}</p>
@@ -387,9 +489,12 @@ interface BookDetailModalProps {
     book: Book;
     isFavorite: boolean;
     toggleFavorite: () => void;
+    isOffline: boolean;
+    onDownload: () => void;
+    onDeleteOffline: () => void;
     onClose: () => void;
 }
-const BookDetailModal: React.FC<BookDetailModalProps> = ({ book, isFavorite, toggleFavorite, onClose }) => {
+const BookDetailModal: React.FC<BookDetailModalProps> = ({ book, isFavorite, toggleFavorite, isOffline, onDownload, onDeleteOffline, onClose }) => {
     const [summary, setSummary] = useState('');
     const [isLoadingSummary, setIsLoadingSummary] = useState(false);
 
@@ -437,12 +542,16 @@ const BookDetailModal: React.FC<BookDetailModalProps> = ({ book, isFavorite, tog
                     </div>
                 </div>
 
-                 <div className="p-4 flex gap-4 border-t bg-gray-50 rounded-b-lg">
+                 <div className="p-4 grid grid-cols-2 gap-4 border-t bg-gray-50 rounded-b-lg">
                     <button onClick={toggleFavorite} className="w-full flex items-center justify-center gap-2 border-2 border-brand-blue text-brand-blue font-bold py-2 px-4 rounded-lg hover:bg-brand-blue hover:text-white transition">
                         <HeartIcon className="w-5 h-5" filled={isFavorite} />
-                        {isFavorite ? 'Remover Favorito' : 'Adicionar Favorito'}
+                        {isFavorite ? 'Favoritado' : 'Favoritar'}
                     </button>
-                    <button onClick={() => alert('Função de leitura indisponível nesta demonstração.')} className="w-full bg-brand-gold text-brand-blue font-bold py-2 px-4 rounded-lg hover:bg-amber-300 transition">
+                    <button onClick={isOffline ? onDeleteOffline : onDownload} className="w-full flex items-center justify-center gap-2 border-2 border-brand-blue text-brand-blue font-bold py-2 px-4 rounded-lg hover:bg-brand-blue hover:text-white transition">
+                       {isOffline ?  <TrashIcon className="w-5 h-5" /> : <ArrowDownTrayIcon className="w-5 h-5" />}
+                       {isOffline ? 'Remover Offline' : 'Salvar Offline'}
+                    </button>
+                    <button onClick={() => alert('Função de leitura indisponível nesta demonstração.')} className="col-span-2 w-full bg-brand-gold text-brand-blue font-bold py-3 px-4 rounded-lg hover:bg-amber-300 transition">
                         Ler Agora
                     </button>
                 </div>
